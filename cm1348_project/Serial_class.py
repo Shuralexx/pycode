@@ -1,13 +1,19 @@
 import serial
-import serial.tools.list_ports_windows
+try:
+    from serial.tools import list_ports
+except Exception:  # pragma: no cover - fallback when pyserial missing
+    list_ports = None
 
 
 class SerialAchieve:
     def __init__(self):
         self.ser = None
         self.port = None
-        self.port_list = list(serial.tools.list_ports_windows.comports()) # 获取串口列表
-        #assert (len(self.port_list) != 0), '无可用串口'
+        if list_ports:
+            self.port_list = list(list_ports.comports())  # 获取串口列表
+        else:
+            self.port_list = []
+        # assert (len(self.port_list) != 0), '无可用串口'
         self.bold_rate = 115200 # 设置波特率
 
     def port_get(self):

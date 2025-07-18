@@ -124,3 +124,24 @@ As inputs, a write to the GPIOD has no effect.\r\nAs outputs, a write to the GPI
         for name, addr in zip(self.regname, self.regaddr):
             val = self.config[addr]
             print(f"{name} (0x{addr:02X}) = 0x{val:02X}")
+
+
+def main():
+    """Simple demonstration that prints all register values."""
+    dev = cm1348_dev()
+
+    ports = dev.myserial.port_get()
+    if ports:
+        dev.myserial.port = ports[0].device
+        print("Using port:", dev.myserial.port)
+        dev.myserial.open_port()
+        for addr in dev.regaddr:
+            dev.cgf_read(addr)
+        dev.myserial.close_port()
+    else:
+        print("No serial ports found. Only displaying cached values.")
+        dev.show_registers()
+
+
+if __name__ == "__main__":  # pragma: no cover - manual invocation
+    main()
