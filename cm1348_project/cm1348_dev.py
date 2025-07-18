@@ -65,46 +65,51 @@ As inputs, a write to the GPIOD has no effect.\r\nAs outputs, a write to the GPI
         self.show_registers()
 
     def cgf_write(self, addr: int, value: int):
-        """Write one register.
+        """Write one register and display the result."""
 
-        Parameters
-        ----------
-        addr : int
-            Register address in the range 0x00-0x09.
-        value : int
-            Value to write.
-        """
         self.busy_status = 1
         self.config[addr] = value
-        command = [0x55, 0xAA, 0x01, addr, value, 0x65, 0x6E, 0x64, 0x45, 0x4E, 0x44]
+
+        command = bytes([0x55, 0xAA, 0x01, addr, value,
+                         0x65, 0x6E, 0x64, 0x45, 0x4E, 0x44])
         self.myserial.ser.write(command)
-        reply = [self.myserial.ser.read() for _ in range(11)]
+
+        reply = self.myserial.ser.read(len(command))
         if reply:
-            data = np.frombuffer(np.array(reply), dtype=np.uint8).tolist()
-            if data != [0x55, 0xAA, 0x10, addr, value, 0x65, 0x6E, 0x64, 0x45, 0x4E, 0x44]:
+            data = list(reply)
+            expect = [0x55, 0xAA, 0x10, addr, value,
+                      0x65, 0x6E, 0x64, 0x45, 0x4E, 0x44]
+            if data != expect:
                 print("unexpected write response", data)
         else:
             print("no response on write")
+
         idx = self.regaddr.index(addr)
         print(f"Wrote {self.regname[idx]}(0x{addr:02X}) = 0x{value:02X}")
+
         self.busy_status = 0
         return self
 
     def cgf_read(self, addr: int) -> int:
         """Read one register and return its value."""
+
         self.busy_status = 1
-        # clear input buffer
+
+        # empty any pending bytes from previous commands
         while self.myserial.ser.read():
             continue
 
-        command = [0x55, 0xAA, 0x02, addr, 0x65, 0x6E, 0x64, 0x45, 0x4E, 0x44]
+        command = bytes([0x55, 0xAA, 0x02, addr,
+                         0x65, 0x6E, 0x64, 0x45, 0x4E, 0x44])
         self.myserial.ser.write(command)
-        reply = [self.myserial.ser.read() for _ in range(11)]
+
+        reply = self.myserial.ser.read(len(command))
 
         value = None
         if reply:
-            data = np.frombuffer(np.array(reply), dtype=np.uint8).tolist()
-            if len(data) == 11 and data[0:3] == [0x55, 0xAA, 0x20] and data[3] == addr:
+            data = list(reply)
+            if (len(data) == len(command) and data[0:3] == [0x55, 0xAA, 0x20]
+                    and data[3] == addr):
                 value = data[4]
                 self.config[addr] = value
             else:
@@ -118,6 +123,15 @@ As inputs, a write to the GPIOD has no effect.\r\nAs outputs, a write to the GPI
 
         self.busy_status = 0
         return value
+
+    # Convenience wrappers using a more descriptive name
+    def write_reg(self, addr: int, value: int):
+        """Alias of :meth:`cgf_write`."""
+        return self.cgf_write(addr, value)
+
+    def read_reg(self, addr: int) -> int:
+        """Alias of :meth:`cgf_read`."""
+        return self.cgf_read(addr)
 
     def show_registers(self):
         """Print the value of each register stored in ``self.config``."""
@@ -136,7 +150,7 @@ def main():
         print("Using port:", dev.myserial.port)
         dev.myserial.open_port()
         for addr in dev.regaddr:
-            dev.cgf_read(addr)
+            dev.read_reg(addr)
         dev.myserial.close_port()
     else:
         print("No serial ports found. Only displaying cached values.")
