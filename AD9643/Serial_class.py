@@ -23,6 +23,7 @@ class SerialAchieve:
                 self.ser = serial.Serial(self.port, self.bold_rate, timeout=0.5)
             if self.ser.is_open:
                 print(f"{self.port} + 串口已经打开！")
+
             else:
                 self.ser = serial.Serial(self.port, self.bold_rate, timeout=0.5)
                 print(f"{self.port} + 串口已经打开！")

@@ -4,33 +4,32 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QPushButton, QVBoxLayout, QH
 from Serial_class import SerialAchieve  
 import numpy as np
 from ad9643 import ad9643  
-
+from PyQt5.QtGui import QRegExpValidator
+from PyQt5.QtCore import QRegExp
 
 class ad9643:
     def __init__(self):
         self.busy_status = 0
         self.connect_status = 0
         self.myserial = SerialAchieve()
-        #self.regname = ['CONFIG0', 'CONFIG1', 'MUXSCH', 'MUXDIF', 'MUXSG0', 'MUXSG1', 'SYSRED', 'GPIOC', 'GPIOD', 'ID']
-        #self.regaddr = [0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09]
-        self.reg_mode = ['R/W', 'R/W', 'R/W', 'R/W', 'R/W', 'R/W', 'R/W', 'R/W', 'R/W', 'R']
-        self.TD = [0,8,16,32,64,128,256,384]
-        self.config = [0x0A, 0x83, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x00, 0x8b]  # ADC 当前寄存器值
-        self.config_default = [0x0A, 0x83, 0x00, 0x00, 0xff, 0xff, 0x00, 0xff, 0x00, 0x8b]  # ADC 内部默认寄存器配置
-    
+        self.regname = ['SPI', 'CHIPID', 'CHIPGRADE', 'CHANNELINDEX', 'TRANSFER', 'POWERMODES', 'GLOBALCLOCK', 'CLOCKDIVIDE', 'TESTMODE', 'OFFSETADJUST','OUTPUTMODE','OUTPUTADJUST','CLOCKPHASE','DCOOUTPUT','INPUTSPAN','USER1','USER2','USER3','USER4','USER5','USER6','USER7','USER8','SYNC']
+        self.regaddr = [0x00,0x01,0x02,0x05,0xFF,0x08,0x09,0x0B,0x0D,0x10,0x14,0x15,0x16,0x17,0x18,0x19,0x1A,0x1B,0x1C,0x1D,0x1E,0x1F,0x20,0x3A]
+        self.reg_mode = ['R/W', 'R', 'R', 'R/W', 'R/W', 'R/W', 'R/W', 'R/W', 'R/W', 'R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W']
+        # ADC 默认寄存器配置
+        self.config_default = [0x18, 0x82, None, 0x03, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,0x05,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00]
 
-    def crc(command_reg_write:list):
+
+    def crc(self,command_reg_write:list):
         crc = 0
-
         for byte in command_reg_write:
             crc ^=byte
         return crc
-    def crc2(command_rev:list):
+    def crc2(self,command_rev:list):
         crc =0
         for i in range(0,len(command_rev)-1):
             crc ^=command_rev[i]
         return crc
-    
+
 
     def hand_shake(self):
         self.busy_status = 1
@@ -39,7 +38,6 @@ class ad9643:
         self.myserial.ser.write(command_handshake)
         rx = self.myserial.ser.readline()
 
-  
         if rx:
             rx_asc_array = np.frombuffer(rx, dtype=np.uint8)
             rx_asc = rx_asc_array.tolist()
@@ -52,7 +50,7 @@ class ad9643:
         self.connect_status = 1
         self.busy_status = 0
         return self
-    
+
 
     def ad9643_write_reg(self, addr, para):
         """
@@ -60,8 +58,9 @@ class ad9643:
         :param addr: 1字节，寄存器地址
         :param value: 1字节，要写入的数据
         """
-        self.config[addr] = para
-        length = len(addr)+len(para)
+        #self.config[addr] = para
+        #length = len(addr)+len(para) addr和para都是int，没有len()
+        length = 2
         length_bytes = length.to_bytes(2,byteorder='big')
         command_reg_write = [0xAA, 0x1B, 0x00, 0x02,0x00,addr,para]
         command_reg_Write =[0xAA, 0x1B, 0x00, 0x02,0x00,addr,para,self.crc(command_reg_write)]
@@ -86,13 +85,15 @@ class ad9643:
         return self 
 
 
-    def ad9643_read_reg(self, addr):
+    def ad9643_read_reg(self, addr,timeout=1.0):
         """
         读取ad9643指定寄存器的值
         :param addr: 1字节，寄存器地址
-        :return: 读到的数据值
+        ：param timeout：超时时间
+        :return: 读到的数据值或None
         """
         self.busy_status = 1
+        #清空串口接收缓存区（读到为空为止，确保不会读到历史脏数据）
         while(1):
             rx = self.myserial.ser.read()
             if rx:
@@ -101,26 +102,32 @@ class ad9643:
                 break
         data =0
         command_reg_write = [0xAA, 0x1A,0x00,0x01,0x00,addr]
-        command_reg_Write = [0xAA, 0x1A,0x00,0x01,0x00,addr,self.crc(command_reg_write)]
+        command_reg_Write = command_reg_write+[self.crc(command_reg_write)]
         command_rev = [0x55,0x1A,0x00, 0x01,0x00, data]
 
         rx = []
         self.myserial.ser.write(command_reg_Write)
-        for i in range(0, 7):
+        #循环6次，从串口读取6个字节作为应答帧。
+        for i in range(0, 6):
             rx.append(self.myserial.ser.read())
         if rx:
+            print(rx)
             rx_asc_array = np.frombuffer(np.array(rx), dtype=np.uint8)
-            rx_asc = rx_asc_array.tolist()
+            rx_asc = rx_asc_array.tolist() #转成int数组
+            print(rx_asc)
             if (rx_asc[0] == command_rev[0])and(rx_asc[1] == command_rev[1])and(rx_asc[2] == command_rev[2])and(rx_asc[3] == command_rev[3])and(rx_asc[4] == command_rev[4]):
                 print('The data is', rx_asc[5])
+                return rx_asc[5] #打印读到的字节
             else:
                 print('wrong received command')
+                return None
         else:
             print('Wrong')
+            return None
         self.busy_status = 0
-        return self
+        
     
-
+    #还没加入udp连接
     def udp_Connect(self):
         self.busy_status = 1
         command_handshake = [0xAA,0x30,0x00,0x04,0x00,0x0A,0x20,0x1E,0x32,0x00]
@@ -152,7 +159,6 @@ class ad9643:
         self.connect_status = 1
         self.busy_status = 0
         return self
-
 
 
 class MainWindow(QWidget):
@@ -189,7 +195,20 @@ class MainWindow(QWidget):
         self.addr_edit.setPlaceholderText("寄存器地址(16进制,如0A)")
         self.data_edit = QLineEdit()
         self.data_edit.setPlaceholderText("写入数据(16进制,如FF)")
+        #input_layout.addWidget(self.addr_edit)
+        #input_layout.addWidget(self.data_edit)
+        #layout.addLayout(input_layout)
+
+
+        # 设置 QValidator，只允许输入0-9、A-F、a-f
+        hex_regexp = QRegExp("[0-9A-Fa-f]{1,2}")  # 最多输入2位
+        hex_validator = QRegExpValidator(hex_regexp)
+        self.addr_edit.setValidator(hex_validator)
+        self.data_edit.setValidator(hex_validator)
+
+        input_layout.addWidget(QLabel("地址:"))
         input_layout.addWidget(self.addr_edit)
+        input_layout.addWidget(QLabel("数据:"))
         input_layout.addWidget(self.data_edit)
         layout.addLayout(input_layout)
 
@@ -226,14 +245,22 @@ class MainWindow(QWidget):
         self.device.myserial.port = port
         self.device.myserial.open_port()
         self.append_text(f"已打开串口：{port}")
-
+        """
+        for i in range(len(self.device.regaddr)):
+            if self.device.config_default[i] is not None:
+                self.device.ad9643_write_reg(self.device.regaddr[i], self.device.config_default[i])
+        self.append_text("寄存器初始化完成。")
+        """
     def close_serial(self):
         self.device.myserial.close_port()
         self.append_text("串口已关闭。")
 
     def write_reg(self):
-        addr_str = self.addr_edit.text()
-        value_str = self.data_edit.text()
+        addr_str = self.addr_edit.text().strip()
+        value_str = self.data_edit.text().strip()
+        if not addr_str or not value_str:
+            self.append_text("请先填写完整的寄存器地址和数据！")
+            return
         try:
             addr = int(addr_str, 16)
             value = int(value_str, 16)
@@ -244,6 +271,10 @@ class MainWindow(QWidget):
 
     def read_reg(self):
         addr_str = self.addr_edit.text()
+        addr_str = self.addr_edit.text().strip()
+        if not addr_str :
+            self.append_text("请先填写寄存器地址！")
+            return
         try:
             addr = int(addr_str, 16)
             val = self.device.ad9643_read_reg(addr)
