@@ -4,15 +4,24 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QPushButton, QVBoxLayout, QH
 from Serial_class import SerialAchieve  
 import numpy as np
 from ad9643 import ad9643  
+
 from PyQt5.QtGui import QRegExpValidator
 from PyQt5.QtCore import QRegExp
+from Serial_server import SerialServer
+import threading
 import time
+
+
+
 
 class ad9643:
     def __init__(self):
         self.busy_status = 0
         self.connect_status = 0
         self.myserial = SerialAchieve()
+        #打开另一个
+        self.myserver = SerialServer()
+        
         self.regname = ['SPI', 'CHIPID', 'CHIPGRADE', 'CHANNELINDEX', 'TRANSFER', 'POWERMODES', 'GLOBALCLOCK', 'CLOCKDIVIDE', 'TESTMODE', 'OFFSETADJUST','OUTPUTMODE','OUTPUTADJUST','CLOCKPHASE','DCOOUTPUT','INPUTSPAN','USER1','USER2','USER3','USER4','USER5','USER6','USER7','USER8','SYNC']
         self.regaddr = [0x00,0x01,0x02,0x05,0xFF,0x08,0x09,0x0B,0x0D,0x10,0x14,0x15,0x16,0x17,0x18,0x19,0x1A,0x1B,0x1C,0x1D,0x1E,0x1F,0x20,0x3A]
         self.reg_mode = ['R/W', 'R', 'R', 'R/W', 'R/W', 'R/W', 'R/W', 'R/W', 'R/W', 'R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W']
@@ -20,8 +29,10 @@ class ad9643:
         self.config_default = [0x18, 0x82, None, 0x03, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,0x05,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00]
         self.config_current = [0x18, 0x82, None, 0x03, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,0x05,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00]
 
+
     def crc(self,command_reg_write:list):
         crc = 0
+
         for byte in command_reg_write:
             crc ^=byte
         return crc
@@ -30,28 +41,38 @@ class ad9643:
         for i in range(0,len(command_rev)-1):
             crc ^=command_rev[i]
         return crc
-
+    
 
     def hand_shake(self):
         self.busy_status = 1
         command_handshake = [0xAA,0xFE,0x00,0x01,0x00,0x00,0x55]
         command_rev = [0x55,0xFE,0x00,0x15,0x00,0x43,0x4D,0x33,0x34,0x33,0x32,0x5F,0x44,0x45,0x4D,0x4F,0x5f,0x56,0x31,0x31,0xE2]
+        
+        self.myserial.ser.flushInput()
+        
+        rx=[]
         self.myserial.ser.write(command_handshake)
-        rx = self.myserial.ser.readline()
-
+        time.sleep(1)
+        for i in range(0, 21):
+            rx.append(self.myserial.ser.read())
         if rx:
-            rx_asc_array = np.frombuffer(rx, dtype=np.uint8)
+            print(rx)
+            rx_asc_array = np.frombuffer(np.array(rx), dtype=np.uint8)
             rx_asc = rx_asc_array.tolist()
-            if rx_asc == command_rev:
-                print('success hand shake, device connected!')
+            print(rx_asc)
+            if (rx_asc==command_rev):
+                print('Successfully handshake')
+                
             else:
                 print('wrong received command')
+                
         else:
-            print('no data back!')
+            print('Wrong')
+        
         self.connect_status = 1
         self.busy_status = 0
         return self
-
+    
 
     def ad9643_write_reg(self, addr, para):
         """
@@ -64,173 +85,218 @@ class ad9643:
         self.busy_status = 1
         self.config_current[self.regaddr.index(addr)]=para
         print(self.config_current)
+        
         command_reg_write = [0xAA, 0x1B, 0x00, 0x02,0x00,addr,para]
         command_reg_Write =[0xAA, 0x1B, 0x00, 0x02,0x00,addr,para,self.crc(command_reg_write)]
 
         command_rev = [0x55, 0x1B,0x00,0x01,0x00,0x00]
-        command_Rev = [0x55, 0x1B,0x00,0x01,0x00,0x00,self.crc2(command_rev)]
-
-        rx = []
+        self.myserial.ser.flushInput()
+        
+        rx=[]
         self.myserial.ser.write(command_reg_Write)
-        for i in range(0, 7):
+        time.sleep(1)
+        for i in range(0, 6):
             rx.append(self.myserial.ser.read())
-        if rx[6]==command_Rev[6]:
+        if rx:
+            print(rx)
             rx_asc_array = np.frombuffer(np.array(rx), dtype=np.uint8)
             rx_asc = rx_asc_array.tolist()
-            if rx_asc == command_rev:
-                print('successfully config the device', addr, 'register')
+            print(rx_asc)
+            if (rx_asc==command_rev):
+                print('Successfully write data ',para,' to ',addr )
+                
             else:
                 print('wrong received command')
+                
         else:
-            print('data wrong')
+            print('Wrong')
         self.busy_status = 0
         return self 
 
 
-    def ad9643_read_reg(self, addr,timeout=1.0):
+    def ad9643_read_reg(self, addr):
         """
         读取ad9643指定寄存器的值
         :param addr: 1字节，寄存器地址
-        ：param timeout：超时时间
-        :return: 读到的数据值或None
+        :return: 读到的数据值
         """
         self.busy_status = 1
-        #清空串口接收缓存区（读到为空为止，确保不会读到历史脏数据）
         while(1):
             rx = self.myserial.ser.read()
             if rx:
                 continue
             else:
                 break
+       
         data =self.config_current[self.regaddr.index(addr)]
         print(data)
         command_reg_write = [0xAA, 0x1A,0x00,0x01,0x00,addr]
-        command_reg_Write = command_reg_write+[self.crc(command_reg_write)]
+        command_reg_Write = [0xAA, 0x1A,0x00,0x01,0x00,addr,self.crc(command_reg_write)]
         command_rev = [0x55,0x1A,0x00, 0x01,0x00, data]
 
-        rx = []
+       
+        
+        rx=[]
         self.myserial.ser.write(command_reg_Write)
-        #循环6次，从串口读取6个字节作为应答帧。
+        time.sleep(1)
         for i in range(0, 6):
             rx.append(self.myserial.ser.read())
         if rx:
             print(rx)
             rx_asc_array = np.frombuffer(np.array(rx), dtype=np.uint8)
-            rx_asc = rx_asc_array.tolist() #转成int数组
+            rx_asc = rx_asc_array.tolist()
             print(rx_asc)
-            if (rx_asc[0] == command_rev[0])and(rx_asc[1] == command_rev[1])and(rx_asc[2] == command_rev[2])and(rx_asc[3] == command_rev[3])and(rx_asc[4] == command_rev[4]):
-                print('The data is', rx_asc[5])
-                self.busy_status = 0
-                return rx_asc[5] #打印读到的字节
+            if (rx_asc==command_rev):
+                print('The data in ',addr,'is ',self.config_current[self.regaddr.index(addr)] )
+                
             else:
                 print('wrong received command')
-                self.busy_status = 0
-                return None
+            return self.config_current[self.regaddr.index(addr)]
+                
         else:
             print('Wrong')
-            self.busy_status = 0
             return None
+
         
+    
+
+    def udp_Connect(self):
+        self.busy_status = 1
+        command_handshake = [0xAA,0x30,0x00,0x04,0x00,0x0A,0x20,0x1E,0x32,0x00]
+        command_rev = [0x55,0x30,0x00,0x01,0x00,0x00,0x62]
         
-
-    def udp_Connect(self, local_ip_str, remote_ip_str):
-        def ip_to_bytes(ipstr):
-            return [int(x) for x in ipstr.split('.')]
-        local_ip = ip_to_bytes(local_ip_str)
-        remote_ip = ip_to_bytes(remote_ip_str)
-
-        # 本地IP配置包
-        command_local = [0xAA, 0x30, 0x00, 0x04, 0x00] + local_ip
-        command_local += [self.crc(command_local)]
-        self.myserial.ser.write(bytes(command_local))
-        rx = self.myserial.ser.read(7)  # demo板回包7字节
-        # demo板返回：0x55 0x30 0x00 0x01 0x00 0x00 0x62
-        local_ok = (rx is not None) and (len(rx) == 7) and (list(rx) == [0x55, 0x30, 0x00, 0x01, 0x00, 0x00, 0x62])
-
-        # 远端IP配置包
-        command_remote = [0xAA, 0x31, 0x00, 0x04, 0x00] + remote_ip
-        command_remote += [self.crc(command_remote)]
-        self.myserial.ser.write(bytes(command_remote))
-        rx2 = self.myserial.ser.read(7)
-        # demo板返回：0x55 0x31 0x00 0x01 0x00 0x00 0x63
-        remote_ok = (rx2 is not None) and (len(rx2) == 7) and (list(rx2) == [0x55, 0x31, 0x00, 0x01, 0x00, 0x00, 0x63])
-
-        return local_ok, rx, remote_ok, rx2
-
-
+        self.myserial.ser.flushInput()
+        
+        rx=[]
+        self.myserial.ser.write(command_handshake)
+        time.sleep(1)
+        for i in range(0, 7):
+            rx.append(self.myserial.ser.read())
+        if rx:
+            print(rx)
+            rx_asc_array = np.frombuffer(np.array(rx), dtype=np.uint8)
+            rx_asc = rx_asc_array.tolist()
+            print(rx_asc)
+            if (rx_asc==command_rev):
+                print('Successfully configure the PC IP address to 10.32.30.50 ' )
+                
+            else:
+                print('wrong received command')
+                
+        else:
+            print('Wrong')
+        command_handshake1 = [0xAA,0x31,0x00,0x04,0x00,0x0A,0x20,0x1E,0x33,0x00]
+        command_rev1 = [0x55,0x31,0x00,0x01,0x00,0x00,0x63]
+        self.myserial.ser.flushInput()
+        
+        rx=[]
+        self.myserial.ser.write(command_handshake1)
+        time.sleep(1)
+        for i in range(0, 7):
+            rx.append(self.myserial.ser.read())
+        if rx:
+            print(rx)
+            rx_asc_array = np.frombuffer(np.array(rx), dtype=np.uint8)
+            rx_asc = rx_asc_array.tolist()
+            print(rx_asc)
+            if (rx_asc==command_rev1):
+                print('Successfully configure the DEMO IP address to 10.32.30.50 ' )
+                
+            else:
+                print('wrong received command')
+                
+        else:
+            print('Wrong')
+        self.busy_status=0
+        return self
     def sample(self):
         self.busy_status =1
+        
         command_usermode =[0xAA,0x01,0x02,0x01,0x00,0x00]
         command_userMode =[0xAA,0x01,0x02,0x01,0x00,0x00,self.crc(command_usermode)]
         command_rev=[0x55,0x01,0x02,0x01,0x00,0x00]
         
-        self.myserial.ser.write(command_userMode)
+        self.myserial.ser.flushInput()
+        
         rx=[]
-        for i in range (0,6):
+        self.myserial.ser.write(command_userMode)
+        time.sleep(1)
+        for i in range(0, 6):
             rx.append(self.myserial.ser.read())
         if rx:
+            print(rx)
             rx_asc_array = np.frombuffer(np.array(rx), dtype=np.uint8)
             rx_asc = rx_asc_array.tolist()
-            if rx_asc == command_rev:
-                print('Successfully set user mode')
+            print(rx_asc)
+            if (rx_asc==command_rev):
+                print('Successfully sample' )
+                
             else:
-                print('wrong')
+                print('wrong received command')
+                
         else:
-            print('no data back!')
-        self.ad9643_write_reg(self,0x17,0x8E)
-        self.ad9643_write_reg(self,0xFF,0x01)
+            print('Wrong')
+        self.cgf_write(self,0x17,0x8E)
+        self.cgf_write(self,0xFF,0x01)
         self.busy_status = 0
         return self
-    
-
     def dataCollect(self):
         self.busy_status = 1
         sample_Length=0x01 #具体采样长度不知道
         command_sample =[0xAA,0x35,0x01,0x04,0x00,sample_Length,0x00,0x00,0x00]
         command_Sample =[0xAA,0x35,0x01,0x04,0x00,sample_Length,0x00,0x00,0x00,self.crc(command_sample)]
         command_Rev=[0x55,0x35,0x01,0x01,0x00,0x00]
-        #time.sleep(1)
+        time.sleep(1)
+        self.myserial.ser.flushInput()
+        
+        rx=[]
         self.myserial.ser.write(command_Sample)
-        Rx=[]
-        for i in range(0,6):
-            Rx.append(self.myserial.ser.read())
-        if Rx:
-            Rx_asc_array = np.frombuffer(np.array(Rx), dtype=np.uint8)
-            Rx_asc = Rx_asc_array.tolist()
-            if Rx_asc == command_Rev:
-                print('Successfully sample')
+        time.sleep(1)
+        for i in range(0, 6):
+            rx.append(self.myserial.ser.read())
+        if rx:
+            print(rx)
+            rx_asc_array = np.frombuffer(np.array(rx), dtype=np.uint8)
+            rx_asc = rx_asc_array.tolist()
+            print(rx_asc)
+            if (rx_asc==command_Rev):
+                print('Successfully sample' )
+                
             else:
-                print('wrong')
+                print('wrong received command')
+                
         else:
-            print('no data back!')
+            print('Wrong')
+        
         
         command_collect=[0xAA,0x35,0x07,0x04,0x00,sample_Length,0x00,0x00,0x00]
         command_Collect=[0xAA,0x35,0x07,0x04,0x00,sample_Length,self.crc1(command_collect)]
         command_rev =[0x55,0x35,0x07,0x01,0x00,0x00]
 
-        self.myserial.ser.write(command_Collect)
+        self.myserial.ser.flushInput()
+        
         rx=[]
-        for i in range(0,6):
+        self.myserial.ser.write(command_Collect)
+        time.sleep(1)
+        for i in range(0, 6):
             rx.append(self.myserial.ser.read())
         if rx:
-            rx_asc_array = np.frombuffer(rx, dtype=np.uint8)
+            print(rx)
+            rx_asc_array = np.frombuffer(np.array(rx), dtype=np.uint8)
             rx_asc = rx_asc_array.tolist()
-            if rx_asc == command_rev:
-                print('Successfully transmit')
+            print(rx_asc)
+            if (rx_asc==command_rev):
+                print('Begin the data transimission' )
+                
             else:
-                print('wrong')
+                print('wrong received command')
+                
         else:
-            print('no data back!')
+            print('Wrong')
         #接下来就是用upd类通信了
         self.busy_status = 0
         return self
 
-    def flash(self):
-        for i in range(0,24):
-            self.ad9643_write_reg(self.regaddr[i],self.config_default[i])
-        
-        return self
-    #刷新每个寄存器的默认值
 
 
 class MainWindow(QWidget):
@@ -299,36 +365,6 @@ class MainWindow(QWidget):
         handshake_btn.clicked.connect(self.handshake)
         layout.addWidget(handshake_btn)
 
-        # IP配置区
-        ip_layout = QHBoxLayout()
-        self.local_ip_edit = QLineEdit()
-        self.local_ip_edit.setPlaceholderText("本地IP(如10.32.30.50)")
-        self.remote_ip_edit = QLineEdit()
-        self.remote_ip_edit.setPlaceholderText("远端IP(如10.32.30.51)")
-        ip_layout.addWidget(QLabel("本地IP:"))
-        ip_layout.addWidget(self.local_ip_edit)
-        ip_layout.addWidget(QLabel("远端IP:"))
-        ip_layout.addWidget(self.remote_ip_edit)
-        layout.addLayout(ip_layout)
-
-        # UDP连接按钮
-        udp_btn = QPushButton("UDP连接")
-        udp_btn.clicked.connect(self.udp_connect)
-        layout.addWidget(udp_btn)
-        self.udp_status_label = QLabel("UDP未连接")
-        layout.addWidget(self.udp_status_label)
-
-
-        # 采样按钮
-        sample_btn = QPushButton("启动采样")
-        sample_btn.clicked.connect(self.sample)
-        layout.addWidget(sample_btn)
-
-        # 数据收集按钮
-        collect_btn = QPushButton("收集数据")
-        collect_btn.clicked.connect(self.data_collect)
-        layout.addWidget(collect_btn)
-
         # 信息显示
         self.text_edit = QTextEdit()
         self.text_edit.setReadOnly(True)
@@ -390,43 +426,6 @@ class MainWindow(QWidget):
     def handshake(self):
         self.device.hand_shake()
         self.append_text("已发送握手命令。")
-
-    def udp_connect(self):
-        local_ip = self.local_ip_edit.text().strip()
-        remote_ip = self.remote_ip_edit.text().strip()
-        if not local_ip or not remote_ip:
-            self.append_text("请填写本地和远端IP！")
-            self.udp_status_label.setText("UDP未连接")
-            return
-        try:
-            local_ok, rx, remote_ok, rx2 = self.device.udp_Connect(local_ip, remote_ip)
-            self.append_text(f"本地IP配置回包: {list(rx) if rx else rx}")
-            self.append_text(f"远端IP配置回包: {list(rx2) if rx2 else rx2}")
-            if local_ok and remote_ok:
-                self.udp_status_label.setText("UDP连接成功")
-                self.append_text("UDP连接成功！")
-            else:
-                self.udp_status_label.setText("UDP连接失败")
-                self.append_text("UDP连接失败，请检查回包内容或硬件连线。")
-        except Exception as e:
-            self.udp_status_label.setText("UDP连接失败")
-            self.append_text(f"UDP配置失败: {e}")
-
-
-    def sample(self):
-        try:
-            self.device.sample()
-            self.append_text("采样指令已发送。")
-        except Exception as e:
-            self.append_text(f"采样失败: {e}")
-
-    def data_collect(self):
-        try:
-            self.device.dataCollect()
-            self.append_text("数据收集指令已发送。")
-        except Exception as e:
-            self.append_text(f"数据收集失败: {e}")
-
     
     def append_text(self, msg):
         self.text_edit.append(msg)
@@ -434,7 +433,62 @@ class MainWindow(QWidget):
 
 
 if __name__ == '__main__':
+    
+    AD9643 =ad9643()
+    AD9643.myserver.port='COM2'
+    AD9643.myserver.open_port()
+    def server():
+        print("Start listening on COM2...")
+        while True:
+            rx = AD9643.myserver.ser.readline()
+            if rx:
+                rx_asc_array = np.frombuffer(rx, dtype=np.uint8)
+                rx_asc = rx_asc_array.tolist()
+                
+                print(rx_asc)
+                if rx[1]==0x01:
+                    AD9643.config_current[AD9643.regaddr.index(rx_asc[5])]==rx_asc[6]
+                    command = [0x55,0x01,0x02,0x01,0x00,0x00]
+                    AD9643.myserver.ser.write(command)
+                elif rx[1]==0x1A:
+                    print(AD9643.config_current[AD9643.regaddr.index(rx_asc[5])])
+                    print(AD9643.regaddr.index(rx_asc[5]))
+                    print(rx_asc[5])
+                    command_rev = [0x55,0x1A,0x00, 0x01,0x00,AD9643.config_current[AD9643.regaddr.index(rx_asc[5])]]
+                    AD9643.myserver.ser.write(command_rev)
+                elif rx[1]==0x1B:
+                    command_rev = [0x55, 0x1B,0x00,0x01,0x00,0x00]
+                    AD9643.myserver.ser.write(command_rev)
+                elif rx[1]==0xFE:
+                    command_rev = [0x55,0xFE,0x00,0x15,0x00,0x43,0x4D,0x33,0x34,0x33,0x32,0x5F,0x44,0x45,0x4D,0x4F,0x5f,0x56,0x31,0x31,0xE2]
+                    AD9643.myserver.ser.write(command_rev)
+                elif rx[1]==0x30:
+                    command_rev = [0x55,0x30,0x00,0x01,0x00,0x00,0x62]
+                    AD9643.myserver.ser.write(command_rev)
+                elif rx[1]==0x31:
+                    command_rev = [0x55,0x31,0x00,0x01,0x00,0x00,0x63]
+                    AD9643.myserver.ser.write(command_rev)
+                elif rx[1]==0x35:
+                    command_Rev=[0x55,0x35,0x01,0x01,0x00,0x00]
+                    AD9643.myserver.ser.write(command_Rev)
+
+
+
+                
+
+
+
+                
+            
+    thread = threading.Thread(target=server,daemon=True)
+    thread.start()            
+    
+
+    
+    
     app = QApplication(sys.argv)
     win = MainWindow()
     win.show()
     sys.exit(app.exec_())
+    
+        
