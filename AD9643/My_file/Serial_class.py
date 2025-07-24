@@ -8,7 +8,7 @@ class SerialAchieve:
         self.port = None
         self.port_list = list(serial.tools.list_ports_windows.comports()) # 获取串口列表
         #assert (len(self.port_list) != 0), '无可用串口'
-        self.bold_rate = 115200 # 设置波特率
+        self.bold_rate = 921600 # 设置波特率
 
     def port_get(self):
         return self.port_list

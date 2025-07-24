@@ -7,12 +7,15 @@ from ad9643 import ad9643
 from PyQt5.QtGui import QRegExpValidator
 from PyQt5.QtCore import QRegExp
 import time
+import threading
+from Udp_class import UdpAchieve
 
 class ad9643:
     def __init__(self):
         self.busy_status = 0
         self.connect_status = 0
         self.myserial = SerialAchieve()
+        self.myudp = UdpAchieve()
         self.regname = ['SPI', 'CHIPID', 'CHIPGRADE', 'CHANNELINDEX', 'TRANSFER', 'POWERMODES', 'GLOBALCLOCK', 'CLOCKDIVIDE', 'TESTMODE', 'OFFSETADJUST','OUTPUTMODE','OUTPUTADJUST','CLOCKPHASE','DCOOUTPUT','INPUTSPAN','USER1','USER2','USER3','USER4','USER5','USER6','USER7','USER8','SYNC']
         self.regaddr = [0x00,0x01,0x02,0x05,0xFF,0x08,0x09,0x0B,0x0D,0x10,0x14,0x15,0x16,0x17,0x18,0x19,0x1A,0x1B,0x1C,0x1D,0x1E,0x1F,0x20,0x3A]
         self.reg_mode = ['R/W', 'R', 'R', 'R/W', 'R/W', 'R/W', 'R/W', 'R/W', 'R/W', 'R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W']
@@ -20,31 +23,56 @@ class ad9643:
         self.config_default = [0x18, 0x82, None, 0x03, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,0x05,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00]
         self.config_current = [0x18, 0x82, None, 0x03, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,0x05,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00]
 
-    def crc(self,command_reg_write:list):
+    def crc(self, data):
         crc = 0
-        for byte in command_reg_write:
-            crc ^=byte
+        for byte in data:
+            crc ^= int(byte)
         return crc
-    def crc2(self,command_rev:list):
-        crc =0
-        for i in range(0,len(command_rev)-1):
-            crc ^=command_rev[i]
-        return crc
+
+    def auto_open_serial_and_handshake(self):
+        """
+        自动遍历所有可用串口，尝试握手，直到找到目标板卡并打开
+        返回：成功的串口号或None
+        """
+        from serial.tools import list_ports
+
+        for port_info in list_ports.comports():
+            port = port_info.device
+            try:
+                # 关闭之前的连接
+                if self.myserial.ser and self.myserial.ser.is_open:
+                    self.myserial.ser.close()
+                self.myserial.port = port
+                self.myserial.open_port()
+                time.sleep(0.2)  # 确保串口稳定
+                print(f"尝试串口: {port}")
+                self.hand_shake()
+                # 判断是否握手成功（你有connect_status变量）
+                if self.connect_status == 1:
+                    print(f"成功打开并握手的串口：{port}")
+                    return port
+            except Exception as e:
+                print(f"串口{port}打开或握手失败: {e}")
+        return None
 
 
     def hand_shake(self):
         self.busy_status = 1
+        while self.myserial.ser.in_waiting > 0:
+            self.myserial.ser.read()
         command_handshake = [0xAA,0xFE,0x00,0x01,0x00,0x00,0x55]
-        command_rev = [0x55,0xFE,0x00,0x15,0x00,0x43,0x4D,0x33,0x34,0x33,0x32,0x5F,0x44,0x45,0x4D,0x4F,0x5f,0x56,0x31,0x31,0xE2]
+        command_rev = [0x55,0xFE,0x00,0x15,0x00,0x43,0x4D,0x33,0x34,0x33,0x32,0x5F,0x44,0x45,0x4D,0x4F,0x5F,0x56,0x30,0x31,0xE2]
         self.myserial.ser.write(command_handshake)
-        rx = self.myserial.ser.readline()
-
+        rx=[]
+        for i in range(0, 21):
+            rx.append(self.myserial.ser.read())
         if rx:
-            rx_asc_array = np.frombuffer(rx, dtype=np.uint8)
+            rx_asc_array = np.frombuffer(np.array(rx), dtype=np.uint8)
             rx_asc = rx_asc_array.tolist()
             if rx_asc == command_rev:
                 print('success hand shake, device connected!')
             else:
+                print(rx_asc)
                 print('wrong received command')
         else:
             print('no data back!')
@@ -62,32 +90,34 @@ class ad9643:
         #self.config[addr] = para
         #length = len(addr)+len(para) addr和para都是int，没有len()
         self.busy_status = 1
+        while self.myserial.ser.in_waiting > 0:
+            self.myserial.ser.read()
+
         self.config_current[self.regaddr.index(addr)]=para
-        print(self.config_current)
         command_reg_write = [0xAA, 0x1B, 0x00, 0x02,0x00,addr,para]
         command_reg_Write =[0xAA, 0x1B, 0x00, 0x02,0x00,addr,para,self.crc(command_reg_write)]
 
-        command_rev = [0x55, 0x1B,0x00,0x01,0x00,0x00]
-        command_Rev = [0x55, 0x1B,0x00,0x01,0x00,0x00,self.crc2(command_rev)]
+        command_rev = [0x55, 0x1B,0x00,0x07,0x00,0x00]
+        command_Rev = command_rev + [self.crc(command_rev)]
 
-        rx = []
-        self.myserial.ser.write(command_reg_Write)
-        for i in range(0, 7):
-            rx.append(self.myserial.ser.read())
-        if rx[6]==command_Rev[6]:
-            rx_asc_array = np.frombuffer(np.array(rx), dtype=np.uint8)
-            rx_asc = rx_asc_array.tolist()
-            if rx_asc == command_rev:
+        self.myserial.ser.write(bytes(command_reg_Write))
+        rx = self.myserial.ser.read(7)
+        if rx and len(rx) == 7:
+            rx_list = list(rx)
+            print(f"写寄存器期望回包: {command_Rev}")
+            print(f"实际收到回包: {rx_list}")
+            if rx_list == command_Rev:
+                print(f"寄存器0x{addr:02X}写入值0x{para:02X}成功")
                 print('successfully config the device', addr, 'register')
             else:
                 print('wrong received command')
         else:
             print('data wrong')
         self.busy_status = 0
-        return self 
+        return self
 
 
-    def ad9643_read_reg(self, addr,timeout=1.0):
+    def ad9643_read_reg(self, addr, timeout=1.0):
         """
         读取ad9643指定寄存器的值
         :param addr: 1字节，寄存器地址
@@ -106,23 +136,25 @@ class ad9643:
         print(data)
         command_reg_write = [0xAA, 0x1A,0x00,0x01,0x00,addr]
         command_reg_Write = command_reg_write+[self.crc(command_reg_write)]
-        command_rev = [0x55,0x1A,0x00, 0x01,0x00, data]
+        command_rev = [0x55,0x1A,0x00, 0x07,0x00, data]
+        command_Rev = command_rev+[self.crc(command_rev)]
 
         rx = []
         self.myserial.ser.write(command_reg_Write)
-        #循环6次，从串口读取6个字节作为应答帧。
-        for i in range(0, 6):
+        #循环7次，从串口读取7个字节作为应答帧。
+        for i in range(0, 7):
             rx.append(self.myserial.ser.read())
         if rx:
-            print(rx)
             rx_asc_array = np.frombuffer(np.array(rx), dtype=np.uint8)
             rx_asc = rx_asc_array.tolist() #转成int数组
             print(rx_asc)
-            if (rx_asc[0] == command_rev[0])and(rx_asc[1] == command_rev[1])and(rx_asc[2] == command_rev[2])and(rx_asc[3] == command_rev[3])and(rx_asc[4] == command_rev[4]):
+            if (rx_asc[0] == command_Rev[0])and(rx_asc[1] == command_rev[1])and(rx_asc[2] == command_rev[2])and(rx_asc[3] == command_rev[3])and(rx_asc[4] == command_rev[4]):
                 print('The data is', rx_asc[5])
                 self.busy_status = 0
                 return rx_asc[5] #打印读到的字节
             else:
+                print(f"期望回包: {command_Rev}")
+                print(f"实际回包: {rx_asc}")
                 print('wrong received command')
                 self.busy_status = 0
                 return None
@@ -134,65 +166,89 @@ class ad9643:
         
 
     def udp_Connect(self, local_ip_str, remote_ip_str):
+        while self.myserial.ser.in_waiting > 0:
+            self.myserial.ser.read()
         def ip_to_bytes(ipstr):
             return [int(x) for x in ipstr.split('.')]
+
+        def send_and_check(cmd, ip_bytes, tag=""):
+            # 组包并发送
+            command = [0xAA, cmd, 0x00, 0x04, 0x00] + ip_bytes
+            crc = self.crc(command)
+            command.append(crc)
+            self.myserial.ser.write(bytes(command))
+            rx = self.myserial.ser.read(7)
+            ok = False
+            if rx is not None and len(rx) == 7:
+                rx_prefix = [int(x) for x in rx[:6]]
+                rx_crc = int(rx[6])
+                expect_crc = self.crc(rx_prefix)
+                print(f"{tag}回包前缀: {rx_prefix}, 回包CRC: {rx_crc}, 计算CRC: {expect_crc}")
+                ok = (rx_crc == expect_crc)
+            else:
+                print(f"{tag}未收到回包或长度异常, rx={rx}")
+            return ok, rx
+
+        # 本地IP配置
         local_ip = ip_to_bytes(local_ip_str)
+        local_ok, rx = send_and_check(0x30, local_ip, "本地IP")
+        while self.myserial.ser.in_waiting > 0:
+            self.myserial.ser.read()
+
+        # 远端IP配置
         remote_ip = ip_to_bytes(remote_ip_str)
-
-        # 本地IP配置包
-        command_local = [0xAA, 0x30, 0x00, 0x04, 0x00] + local_ip
-        command_local += [self.crc(command_local)]
-        self.myserial.ser.write(bytes(command_local))
-        rx = self.myserial.ser.read(7)  # demo板回包7字节
-        # demo板返回：0x55 0x30 0x00 0x01 0x00 0x00 0x62
-        local_ok = (rx is not None) and (len(rx) == 7) and (list(rx) == [0x55, 0x30, 0x00, 0x01, 0x00, 0x00, 0x62])
-
-        # 远端IP配置包
-        command_remote = [0xAA, 0x31, 0x00, 0x04, 0x00] + remote_ip
-        command_remote += [self.crc(command_remote)]
-        self.myserial.ser.write(bytes(command_remote))
-        rx2 = self.myserial.ser.read(7)
-        # demo板返回：0x55 0x31 0x00 0x01 0x00 0x00 0x63
-        remote_ok = (rx2 is not None) and (len(rx2) == 7) and (list(rx2) == [0x55, 0x31, 0x00, 0x01, 0x00, 0x00, 0x63])
+        remote_ok, rx2 = send_and_check(0x31, remote_ip, "远端IP")
 
         return local_ok, rx, remote_ok, rx2
 
 
-    def sample(self):
+
+    def usermode(self):
         self.busy_status =1
+        while self.myserial.ser.in_waiting > 0:
+            self.myserial.ser.read()
         command_usermode =[0xAA,0x01,0x02,0x01,0x00,0x00]
         command_userMode =[0xAA,0x01,0x02,0x01,0x00,0x00,self.crc(command_usermode)]
-        command_rev=[0x55,0x01,0x02,0x01,0x00,0x00]
-        
+        command_rev = [0x55,0x01,0x02,0x07,0x00,0x00]
+        command_Rev = [0x55,0x01,0x02,0x07,0x00,0x00,self.crc(command_rev)]
         self.myserial.ser.write(command_userMode)
+        time.sleep(1)
         rx=[]
-        for i in range (0,6):
+        for i in range (0,7):
             rx.append(self.myserial.ser.read())
         if rx:
             rx_asc_array = np.frombuffer(np.array(rx), dtype=np.uint8)
             rx_asc = rx_asc_array.tolist()
-            if rx_asc == command_rev:
-                print('Successfully set user mode')
+            print(f"实际回包: {rx_asc}")
+            print(f"期望回包: {command_Rev}")
+            if rx_asc == command_Rev:
+                print('成功重上电')
+                print("准备写0x17, 0x8E")
+                self.ad9643_write_reg(0x17,0x8E)
+                print("准备写0xFF, 0x01")
+                self.ad9643_write_reg(0xFF,0x01)
+                print("usermode finish")
             else:
                 print('wrong')
         else:
             print('no data back!')
-        self.ad9643_write_reg(self,0x17,0x8E)
-        self.ad9643_write_reg(self,0xFF,0x01)
+
         self.busy_status = 0
         return self
     
 
-    def dataCollect(self):
+    def sample(self):
         self.busy_status = 1
-        sample_Length=0x01 #具体采样长度不知道
-        command_sample =[0xAA,0x35,0x01,0x04,0x00,sample_Length,0x00,0x00,0x00]
-        command_Sample =[0xAA,0x35,0x01,0x04,0x00,sample_Length,0x00,0x00,0x00,self.crc(command_sample)]
-        command_Rev=[0x55,0x35,0x01,0x01,0x00,0x00]
-        #time.sleep(1)
+        while self.myserial.ser.in_waiting>0:
+            self.myserial.ser.read()
+        command_sample =[0xAA,0x35,0x01,0x04,0x00,0x00,0x00,0x80,0x00]
+        command_Sample =[0xAA,0x35,0x01,0x04,0x00,0x00,0x00,0x80,0x00,self.crc(command_sample)]
+        command_rev=[0x55,0x35,0x01,0x07,0x00,0x00]
+        command_Rev=command_rev + [self.crc(command_rev)]
+        time.sleep(1)
         self.myserial.ser.write(command_Sample)
         Rx=[]
-        for i in range(0,6):
+        for i in range(0,7):
             Rx.append(self.myserial.ser.read())
         if Rx:
             Rx_asc_array = np.frombuffer(np.array(Rx), dtype=np.uint8)
@@ -203,27 +259,39 @@ class ad9643:
                 print('wrong')
         else:
             print('no data back!')
-        
-        command_collect=[0xAA,0x35,0x07,0x04,0x00,sample_Length,0x00,0x00,0x00]
-        command_Collect=[0xAA,0x35,0x07,0x04,0x00,sample_Length,self.crc1(command_collect)]
-        command_rev =[0x55,0x35,0x07,0x01,0x00,0x00]
+        self.busy_status = 0
+        return self
+    
+
+    def datacollect(self):
+        self.busy_status = 1
+        while self.myserial.ser.in_waiting>0:
+            self.myserial.ser.read()
+        command_collect=[0xAA,0x35,0x07,0x04,0x00,0x00,0x00,0x80,0x00]
+        command_Collect=command_collect + [self.crc(command_collect)]
+        command_rev =[0x55,0x35,0x07,0x07,0x00,0x00]
+        command_Rev =[0x55,0x35,0x07,0x07,0x00,0x00,self.crc(command_rev)]
 
         self.myserial.ser.write(command_Collect)
         rx=[]
-        for i in range(0,6):
+        for i in range(0,7):
             rx.append(self.myserial.ser.read())
         if rx:
-            rx_asc_array = np.frombuffer(rx, dtype=np.uint8)
+            rx_asc_array = np.frombuffer(np.array(rx), dtype=np.uint8)
             rx_asc = rx_asc_array.tolist()
-            if rx_asc == command_rev:
+            if rx_asc == command_Rev:
                 print('Successfully transmit')
+                self.busy_status = 0
+                return True
             else:
                 print('wrong')
+                self.busy_status = 0
+                return False
         else:
             print('no data back!')
-        #接下来就是用upd类通信了
-        self.busy_status = 0
-        return self
+            self.busy_status = 0
+            return False
+
 
     def flash(self):
         for i in range(0,24):
@@ -231,6 +299,36 @@ class ad9643:
         
         return self
     #刷新每个寄存器的默认值
+
+    def udp_data_transmit(self):
+        
+        self.sample()
+        self.datacollect()
+        def udp_run():
+            self.myudp.open()
+            self.myudp.read()
+        thread = threading.Thread(target=udp_run,daemon=True)
+        thread.start()
+
+    def reset_fpga(self):
+        # 组包 [0xAA, 0x32, 0x00, 0x01, 0x00, 0x00, CRC]
+        command = [0xAA, 0x32, 0x00, 0x01, 0x00, 0x00]
+        crc = self.crc(command)
+        command.append(crc)
+        self.myserial.ser.write(bytes(command))
+        rx = self.myserial.ser.read(7)
+        ok = False
+        if rx is not None and len(rx) == 7:
+            rx_prefix = [int(x) for x in rx[:6]]
+            rx_crc = int(rx[6])
+            expect_crc = self.crc(rx_prefix)
+            print(f"FPGA复位回包前缀: {rx_prefix}, 回包CRC: {rx_crc}, 计算CRC: {expect_crc}")
+            ok = (rx_crc == expect_crc) and (rx_prefix[-1] == 0x00)
+        else:
+            print(f"FPGA复位未收到回包或长度异常, rx={rx}")
+        return ok, rx
+
+
 
 
 class MainWindow(QWidget):
@@ -271,7 +369,6 @@ class MainWindow(QWidget):
         #input_layout.addWidget(self.data_edit)
         #layout.addLayout(input_layout)
 
-
         # 设置 QValidator，只允许输入0-9、A-F、a-f
         hex_regexp = QRegExp("[0-9A-Fa-f]{1,2}")  # 最多输入2位
         hex_validator = QRegExpValidator(hex_regexp)
@@ -294,10 +391,22 @@ class MainWindow(QWidget):
         rw_layout.addWidget(read_btn)
         layout.addLayout(rw_layout)
 
+        # FPGA复位按钮
+        reset_btn = QPushButton("FPGA复位")
+        reset_btn.clicked.connect(self.reset_fpga)
+        layout.addWidget(reset_btn)
+
+        # 自动检测按钮
+        auto_btn = QPushButton("自动识别串口并握手")
+        auto_btn.clicked.connect(self.auto_find_and_open_serial)
+        layout.addWidget(auto_btn)
+
+        '''
         # 握手按钮
         handshake_btn = QPushButton("设备握手")
         handshake_btn.clicked.connect(self.handshake)
         layout.addWidget(handshake_btn)
+        '''
 
         # IP配置区
         ip_layout = QHBoxLayout()
@@ -318,15 +427,14 @@ class MainWindow(QWidget):
         self.udp_status_label = QLabel("UDP未连接")
         layout.addWidget(self.udp_status_label)
 
-
-        # 采样按钮
-        sample_btn = QPushButton("启动采样")
-        sample_btn.clicked.connect(self.sample)
+        # 用户模式按钮
+        sample_btn = QPushButton("启动用户模式")
+        sample_btn.clicked.connect(self.usermode)
         layout.addWidget(sample_btn)
 
-        # 数据收集按钮
-        collect_btn = QPushButton("收集数据")
-        collect_btn.clicked.connect(self.data_collect)
+        # 数据采集按钮
+        collect_btn = QPushButton("数据采集")
+        collect_btn.clicked.connect(self.udp_transmit)
         layout.addWidget(collect_btn)
 
         # 信息显示
@@ -387,6 +495,17 @@ class MainWindow(QWidget):
         except Exception as e:
             self.append_text(f"读取寄存器失败: {e}")
     
+    def auto_find_and_open_serial(self):
+        port = self.device.auto_open_serial_and_handshake()
+        if port:
+            self.append_text(f"自动识别并握手成功，串口为：{port}")
+            # 选中combobox对应项
+            index = self.combobox.findText(port)
+            if index != -1:
+                self.combobox.setCurrentIndex(index)
+        else:
+            self.append_text("自动识别失败，未找到可用的串口设备")
+
     def handshake(self):
         self.device.hand_shake()
         self.append_text("已发送握手命令。")
@@ -412,22 +531,32 @@ class MainWindow(QWidget):
             self.udp_status_label.setText("UDP连接失败")
             self.append_text(f"UDP配置失败: {e}")
 
-
-    def sample(self):
+    def usermode(self):
         try:
-            self.device.sample()
-            self.append_text("采样指令已发送。")
+            self.device.usermode()
+            self.append_text("用户模式指令已发送。")
         except Exception as e:
-            self.append_text(f"采样失败: {e}")
+            self.append_text(f"用户模式失败: {e}")
 
-    def data_collect(self):
+    def udp_transmit(self):
         try:
-            self.device.dataCollect()
-            self.append_text("数据收集指令已发送。")
+            self.device.udp_data_transmit()
+            self.append_text("数据采集指令已发送。")
         except Exception as e:
-            self.append_text(f"数据收集失败: {e}")
+            self.append_text(f"数据采集失败: {e}")
 
-    
+    def reset_fpga(self):
+        try:
+            ok, rx = self.device.reset_fpga()
+            if ok:
+                self.append_text("FPGA复位成功！")
+            else:
+                self.append_text(f"FPGA复位失败，回包: {list(rx) if rx else rx}")
+        except Exception as e:
+            self.append_text(f"FPGA复位异常: {e}")
+
+
+
     def append_text(self, msg):
         self.text_edit.append(msg)
 
