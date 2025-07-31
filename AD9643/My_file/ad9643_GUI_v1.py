@@ -3,17 +3,18 @@ import time
 import threading
 import numpy as np
 import pyqtgraph as pg
+import socket
+import numpy as np
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QGridLayout, QVBoxLayout, QHBoxLayout,
                             QGroupBox, QPushButton, QComboBox, QLabel, QLineEdit, QTextEdit, QProgressBar
                             , QTableWidget, QTableWidgetItem, QAbstractItemView,QMessageBox,QSizePolicy,QTabWidget)
-import numpy as np
-
 from Serial_class import SerialAchieve  
-from Udp_class import UdpAchieve
 from ad9643 import ad9643  
 from PyQt5.QtGui import QRegExpValidator
 from PyQt5.QtCore import Qt
 from scipy import fftpack, signal
+
+
 
 
 class ad9643:
@@ -21,13 +22,18 @@ class ad9643:
         self.busy_status = 0
         self.connect_status = 0
         self.myserial = SerialAchieve()
-        self.myudp = UdpAchieve()
         self.regname = ['SPI', 'CHIPID', 'CHIPGRADE', 'CHANNELINDEX', 'TRANSFER', 'POWERMODES', 'GLOBALCLOCK', 'CLOCKDIVIDE', 'TESTMODE', 'OFFSETADJUST','OUTPUTMODE','OUTPUTADJUST','CLOCKPHASE','DCOOUTPUT','INPUTSPAN','USER1','USER2','USER3','USER4','USER5','USER6','USER7','USER8','SYNC']
         self.regaddr =        [0x00, 0x01, 0x02, 0x05, 0xFF, 0x08, 0x09, 0x0B, 0x0D, 0x10, 0x14,0x15,0x16,0x17,0x18,0x19,0x1A,0x1B,0x1C,0x1D,0x1E,0x1F,0x20,0x3A]
         self.reg_mode = ['R/W', 'R', 'R', 'R/W', 'R/W', 'R/W', 'R/W', 'R/W', 'R/W', 'R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W','R/W']
         # ADC 默认寄存器配置
         self.config_default = [0x18, 0x82, None, 0x03, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x05,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00]
         self.config_current = [0x18, 0x00, None, 0x03, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x05,0x01,0x00,0x8E,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00]
+
+        self.bagsize = 1000  # 定义数组大小
+        self.sample_bag = 1  # 采样率
+        self.ttemp = 0       # 数据计数器
+        self.datax = np.array([])  # 数据数组
+        self.tim = np.array([]) 
 
     def crc(self, data):
         crc = 0
@@ -61,7 +67,6 @@ class ad9643:
                 print(f"串口{port}打开或握手失败: {e}")
         return None
 
-
     def hand_shake(self):
         self.busy_status = 1
         while self.myserial.ser.in_waiting > 0:
@@ -85,7 +90,6 @@ class ad9643:
         self.connect_status = 1
         self.busy_status = 0
         return self
-
 
     def ad9643_write_reg(self, addr, para):
         """
@@ -124,7 +128,6 @@ class ad9643:
         
         self.busy_status = 0
         return self
-
 
     def ad9643_read_reg(self, addr, timeout=1.0):
         """
@@ -171,8 +174,6 @@ class ad9643:
             print('Wrong')
             self.busy_status = 0
             return None
-        
-        
 
     def udp_Connect(self, local_ip_str, remote_ip_str):
         while self.myserial.ser.in_waiting > 0:
@@ -185,6 +186,7 @@ class ad9643:
             command = [0xAA, cmd, 0x00, 0x04, 0x00] + ip_bytes
             crc = self.crc(command)
             command.append(crc)
+            print(f"{tag}收到命令: {command}")
             self.myserial.ser.write(bytes(command))
             rx = self.myserial.ser.read(7)
             ok = False
@@ -201,6 +203,7 @@ class ad9643:
         # 本地IP配置
         local_ip = ip_to_bytes(local_ip_str)
         local_ok, rx = send_and_check(0x30, local_ip, "本地IP")
+
         while self.myserial.ser.in_waiting > 0:
             self.myserial.ser.read()
 
@@ -209,8 +212,6 @@ class ad9643:
         remote_ok, rx2 = send_and_check(0x31, remote_ip, "远端IP")
 
         return local_ok, rx, remote_ok, rx2
-
-
 
     def usermode(self):
         self.busy_status =1
@@ -244,17 +245,17 @@ class ad9643:
 
         self.busy_status = 0
         return self
-    
 
-    def sample(self):
+    def sample(self,sample_len=0x2000):
         self.busy_status = 1
         while self.myserial.ser.in_waiting>0:
             self.myserial.ser.read()
-        command_sample =[0xAA,0x35,0x01,0x04,0x00,0x00,0x00,0x80,0x00]
-        command_Sample =[0xAA,0x35,0x01,0x04,0x00,0x00,0x00,0x80,0x00,self.crc(command_sample)]
-        command_rev=[0x55,0x35,0x01,0x07,0x00,0x00]
-        command_Rev=command_rev + [self.crc(command_rev)]
-        time.sleep(1)
+        # 小端，低位在前
+        len_bytes = sample_len.to_bytes(4, byteorder="little")
+        command_sample = [0xAA,0x35,0x01,0x04,0x00] + list(len_bytes)
+        command_Sample = command_sample + [self.crc(command_sample)]
+        command_rev = [0x55,0x35,0x01,0x07,0x00,0x00]
+        command_Rev = command_rev + [self.crc(command_rev)]
         self.myserial.ser.write(command_Sample)
         Rx=[]
         for i in range(0,7):
@@ -263,6 +264,7 @@ class ad9643:
             Rx_asc_array = np.frombuffer(np.array(Rx), dtype=np.uint8)
             Rx_asc = Rx_asc_array.tolist()
             if Rx_asc == command_Rev:
+                print(command_Sample)
                 print('Successfully sample')
             else:
                 print('wrong')
@@ -270,25 +272,27 @@ class ad9643:
             print('no data back!')
         self.busy_status = 0
         return self
-    
 
-    def datacollect(self):
+    def datacollect(self, sample_len=0x2000):
         self.busy_status = 1
-        while self.myserial.ser.in_waiting>0:
+        while self.myserial.ser.in_waiting > 0:
             self.myserial.ser.read()
-        command_collect=[0xAA,0x35,0x07,0x04,0x00,0x00,0x00,0x80,0x00]
-        command_Collect=command_collect + [self.crc(command_collect)]
-        command_rev =[0x55,0x35,0x07,0x07,0x00,0x00]
-        command_Rev =[0x55,0x35,0x07,0x07,0x00,0x00,self.crc(command_rev)]
+        # 小端，低位在前
+        len_bytes = sample_len.to_bytes(4, byteorder="little")
+        command_collect = [0xAA, 0x35, 0x07, 0x04, 0x00] + list(len_bytes)
+        command_Collect = command_collect + [self.crc(command_collect)]
+        command_rev = [0x55, 0x35, 0x07, 0x07, 0x00, 0x00]
+        command_Rev = command_rev + [self.crc(command_rev)]
 
         self.myserial.ser.write(command_Collect)
-        rx=[]
-        for i in range(0,7):
+        rx = []
+        for i in range(0, 7):
             rx.append(self.myserial.ser.read())
         if rx:
             rx_asc_array = np.frombuffer(np.array(rx), dtype=np.uint8)
             rx_asc = rx_asc_array.tolist()
             if rx_asc == command_Rev:
+                print(command_Collect)
                 print('Successfully transmit')
                 self.busy_status = 0
                 return True
@@ -300,24 +304,6 @@ class ad9643:
             print('no data back!')
             self.busy_status = 0
             return False
-
-
-    def flash(self):
-        for i in range(0,24):
-            self.ad9643_write_reg(self.regaddr[i],self.config_default[i])
-        
-        return self
-    #刷新每个寄存器的默认值
-
-    def udp_data_transmit(self):
-        
-        self.sample()
-        self.datacollect()
-        def udp_run():
-            self.myudp.open()
-            self.myudp.read()
-        thread = threading.Thread(target=udp_run,daemon=True)
-        thread.start()
 
     def reset_fpga(self):
         # 组包 [0xAA, 0x32, 0x00, 0x01, 0x00, 0x00, CRC]
@@ -336,6 +322,31 @@ class ad9643:
         else:
             print(f"FPGA复位未收到回包或长度异常, rx={rx}")
         return ok, rx
+
+    def udp_recv_data(self, local_ip, port, total_groups, timeout=3.0):
+        """
+        循环收包，直到总点数收齐
+        """
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65535)
+        sock.settimeout(timeout)
+        sock.bind((local_ip, port))
+        data_bytes = []
+        groups_received = 0
+        try:
+            while groups_received < total_groups:
+                pkt, addr = sock.recvfrom(4096)
+                data_bytes.append(pkt)
+                groups_received += len(pkt) // 4   # 4字节1组
+                print(f"收到包len={len(pkt)}，累计组数={groups_received}，来源：{addr}")
+            return b''.join(data_bytes)
+        except Exception as e:
+            print(f"UDP收包超时/异常: {e}")
+            return b''.join(data_bytes)
+        finally:
+            sock.close()
+
 
 
 
@@ -356,6 +367,7 @@ class MainWindow(QMainWindow):
         main_layout = QGridLayout()
         main_widget.setLayout(main_layout)
 
+        
         # -------- 1. 顶部串口区 --------
         serial_group = QGroupBox("串口控制")
         serial_layout = QHBoxLayout()
@@ -377,7 +389,7 @@ class MainWindow(QMainWindow):
         #serial_layout.addWidget(self.status_label)
         serial_layout.addWidget(self.progress_bar)
         main_layout.addWidget(serial_group, 0, 0, 1, 4)
-
+        
         # -------- 2. 左侧设备操作/功能控制 --------
         ctrl_group = QGroupBox("设备操作")
         ctrl_layout = QVBoxLayout()
@@ -388,12 +400,14 @@ class MainWindow(QMainWindow):
         self.reset_btn.clicked.connect(self.reset_fpga)
         self.auto_btn = QPushButton("自动识别串口并握手")
         self.auto_btn.clicked.connect(self.auto_find_and_open_serial)
-        self.usermode_btn = QPushButton("启动用户模式")
-        self.usermode_btn.clicked.connect(self.usermode)
+        self.chipreset_btn = QPushButton("Chip Reset")
+        self.chipreset_btn.clicked.connect(self.chip_reset)
+        ctrl_layout.addWidget(self.chipreset_btn)
         ctrl_layout.addWidget(self.handshake_btn)
         ctrl_layout.addWidget(self.reset_btn)
         ctrl_layout.addWidget(self.auto_btn)
-        ctrl_layout.addWidget(self.usermode_btn)
+    
+
         main_layout.addWidget(ctrl_group, 1, 0, 2, 1)#放在第1行第0列（row=1, column=0），占2行1列
 
         # -------- 3. 中央寄存器读写与UDP配置 --------
@@ -401,6 +415,11 @@ class MainWindow(QMainWindow):
         op_layout = QVBoxLayout()
         op_group.setLayout(op_layout)
         op_group.setFixedWidth(320)
+
+        self.reload_regs_btn = QPushButton("重读并刷新寄存器")
+        self.reload_regs_btn.clicked.connect(self.reload_and_refresh_regs)
+        op_layout.addWidget(self.reload_regs_btn)
+
 
         # 3.1 地址/数据输入区
         reg_layout = QHBoxLayout()
@@ -425,9 +444,9 @@ class MainWindow(QMainWindow):
         # 3.3 UDP配置
         ip_layout = QHBoxLayout()
         self.local_ip_edit = QLineEdit()
-        self.local_ip_edit.setPlaceholderText("本地IP")
+        self.local_ip_edit.setPlaceholderText("末位或完整IP,如51或10.32.30.51")
         self.remote_ip_edit = QLineEdit()
-        self.remote_ip_edit.setPlaceholderText("远端IP")
+        self.remote_ip_edit.setPlaceholderText("末位或完整IP,如159或10.32.30.159")
         ip_layout.addWidget(QLabel("本地IP:"))
         ip_layout.addWidget(self.local_ip_edit)
         ip_layout.addWidget(QLabel("远端IP:"))
@@ -439,11 +458,20 @@ class MainWindow(QMainWindow):
         self.udp_status_label = QLabel("UDP未连接")
         op_layout.addWidget(self.udp_btn)
         op_layout.addWidget(self.udp_status_label)
+
+        #3.5.0采样长度输入框
+        # 采样长度输入区
+        samplelen_layout = QHBoxLayout()
+        self.samplelen_edit = QLineEdit()
+        self.samplelen_edit.setPlaceholderText("采样长度(十进制/0x十六进制)")
+        samplelen_layout.addWidget(QLabel("采样长度:"))
+        samplelen_layout.addWidget(self.samplelen_edit)
+        op_layout.addLayout(samplelen_layout)
+
         # 3.5 采集相关
         self.sample_btn = QPushButton("数据采样")
         self.sample_btn.clicked.connect(self.udp_transmit)
         op_layout.addWidget(self.sample_btn)
-
         # 3.6 批量写入寄存器按钮
         self.write_all_btn = QPushButton("批量写入全部寄存器")
         self.write_all_btn.clicked.connect(self.write_all_regs)
@@ -581,8 +609,17 @@ class MainWindow(QMainWindow):
 
         # 采样+显示按钮，紧跟graph_diaplay后面
         self.capture_btn = QPushButton("采样+显示")
-        self.capture_btn.clicked.connect(self.capture_and_plot)
+        self.capture_btn.clicked.connect(self.udp_transmit_and_show)
         main_layout.addWidget(self.capture_btn, 4, 2, 1, 1)
+
+    def reload_and_refresh_regs(self):
+        try:
+            self.reload_all_regs()
+            self.refresh_reg_table()
+            self.append_text("已重新读取并刷新所有R/W寄存器。")
+        except Exception as e:
+            self.append_text(f"重读寄存器失败: {e}")
+
 
 
     def write_all_regs(self):
@@ -605,22 +642,6 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "输入错误", f"第{i+1}行当前值非法，请输入合法16进制数")
                 return  # 只弹一次，直接终止！
 
-        # 检查通过，才真正批量写入
-        # count = 0
-        # for i, (addr, val) in enumerate(zip(self.device.regaddr, self.device.config_current)):
-        #     cell_item = self.tab4_table.item(i, 2)
-        #     if cell_item is None:
-        #         continue
-        #     cell_str = cell_item.text().replace("0x", "").strip()
-        #     # 跳过空值或 None
-        #     if not cell_str or cell_str.lower() == "none":
-        #         continue
-        #     val = int(cell_str, 16)
-        #     self.device.ad9643_write_reg(addr, val)
-        #     count += 1
-        # self.append_text(f"批量写入完成，共写入{count}个寄存器。")
-        # self.refresh_reg_table()
-        #只写被修改过的
         count = 0
         for row in self.modified_regs:
             addr = self.device.regaddr[row]
@@ -709,6 +730,24 @@ class MainWindow(QMainWindow):
     def udp_connect(self):
         local_ip = self.local_ip_edit.text().strip()
         remote_ip = self.remote_ip_edit.text().strip()
+        # ---- 自动补全最后一段 IP ----
+        def fix_ip(ip):
+            ip = ip.strip()
+            # 如果只填了数字，自动补前缀
+            if ip.isdigit():
+                return f"10.32.30.{ip}"
+            # 如果填了 1~3 段，比如 "30.51" 或 "32.30.51"，也补全
+            segs = ip.split('.')
+            if len(segs) == 2 and all(s.isdigit() for s in segs):
+                return f"10.32.{segs[0]}.{segs[1]}"
+            if len(segs) == 3 and all(s.isdigit() for s in segs):
+                return f"10.{segs[0]}.{segs[1]}.{segs[2]}"
+            # 否则原样返回
+            return ip
+
+        local_ip = fix_ip(local_ip)
+        remote_ip = fix_ip(remote_ip)
+
         if not local_ip or not remote_ip:
             self.append_text("请填写本地和远端IP！")
             self.udp_status_label.setText("UDP未连接")
@@ -727,20 +766,44 @@ class MainWindow(QMainWindow):
             self.udp_status_label.setText("UDP连接失败")
             self.append_text(f"UDP配置失败: {e}")
 
-    def usermode(self):
+    def chip_reset(self):
         try:
-            self.device.usermode()
-            self.refresh_reg_table()  # 刷新寄存器表格
-            self.append_text("用户模式指令已发送。")
+            self.device.usermode()  # 1. 发usermode指令
+            self.device.ad9643_write_reg(0x00, 0x1C)  # 2. 复位使能
+            time.sleep(0.1)  # 100ms
+            self.device.ad9643_write_reg(0x00, 0x18)  # 3. 拉低bit2
+            self.device.ad9643_write_reg(0x17, 0x8E)  # 4. 写0x17=0x8E
+            self.device.ad9643_write_reg(0xFF, 0x01)  # 5. 写0xFF=0x01
+            #self.reload_all_regs()
+            #self.refresh_reg_table()
+            self.append_text("芯片复位（Chip Reset）已完成。")
         except Exception as e:
-            self.append_text(f"用户模式失败: {e}")
+            self.append_text(f"芯片复位失败: {e}")
+            
+    def reload_all_regs(self):
+        # 重新读取所有R/W寄存器
+        for i, (addr, mode) in enumerate(zip(self.device.regaddr, self.device.reg_mode)):
+            if mode != "R":  # 跳过只读
+                val = self.device.ad9643_read_reg(addr)
+                self.device.config_current[i] = val
+
+
 
     def udp_transmit(self):
         try:
-            self.device.udp_data_transmit()
-            self.append_text("数据采集指令已发送。")
+            samplelen_str = self.samplelen_edit.text().strip()
+            if samplelen_str == "":
+                sample_len = 0x2000  # 默认采样长度
+            else:
+                sample_len = int(samplelen_str, 0)   # 自动识别 0x 前缀
+            self.device.sample(sample_len)
+            time.sleep(2)
+            self.device.datacollect(sample_len)
+            self.append_text(f"数据采集指令已发送，采样长度: {sample_len}")
         except Exception as e:
             self.append_text(f"数据采集失败: {e}")
+
+
 
     def reset_fpga(self):
         try:
@@ -808,67 +871,123 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "输入错误", "请输入合法16进制数")
             self.refresh_reg_table()  # 恢复原值
 
-    def capture_and_plot(self):
-        # step1: 采样指令
-        self.device.sample()
-        self.device.datacollect()
-        time.sleep(0.2)  # 可根据实际情况调整
-        data = self.device.myudp.rx_data
-        if not data or len(data) == 0:
-            self.append_text("未获得采样数据")
-            return
-        arr = np.array(data, dtype=np.int16)  # 若不是16bit，需按实际位宽修改
 
-        # --- 时域波形 ---
-        self.tab1_plt.clear()
-        self.tab1_plt.plot(arr, pen='r')
-        # 填写表格统计
-        self.tab1_measure.setItem(0, 0, QTableWidgetItem("通道1"))
-        self.tab1_measure.setItem(0, 1, QTableWidgetItem(str(np.min(arr))))
-        self.tab1_measure.setItem(0, 2, QTableWidgetItem(str(np.max(arr))))
-        self.tab1_measure.setItem(0, 3, QTableWidgetItem("%.3f" % np.std(arr)))
-        self.tab1_measure.setItem(0, 4, QTableWidgetItem("%.3f" % np.mean(arr)))
+    def udp_transmit_and_show(self):
+        try:
+            samplelen_str = self.samplelen_edit.text().strip()
+            if samplelen_str == "":
+                sample_len = 0x2000
+            else:
+                sample_len = int(samplelen_str, 0)
+            # sample_len: 每个通道点数
+            remote_ip = self.remote_ip_edit.text().strip()
+            if remote_ip.isdigit():
+                remote_ip = f"10.32.30.{remote_ip}"
+            port = 8000
 
-        # --- 直方图 ---
-        self.tab2_plt.clear()
-        hist, bins = np.histogram(arr, bins=100)
-        barItem = pg.BarGraphItem(x=bins[:-1], height=hist, width=(bins[1]-bins[0]), brush='b')
-        self.tab2_plt.addItem(barItem)
-        self.tab2_measure.setItem(0, 0, QTableWidgetItem("通道1"))
-        self.tab2_measure.setItem(0, 1, QTableWidgetItem(str(np.min(arr))))
-        self.tab2_measure.setItem(0, 2, QTableWidgetItem(str(np.max(arr))))
-        rms = np.std(arr)
-        self.tab2_measure.setItem(0, 3, QTableWidgetItem("%.2f" % rms))
-        self.tab2_measure.setItem(0, 4, QTableWidgetItem("%.2f" % np.mean(arr)))
-        self.tab2_measure.setItem(0, 5, QTableWidgetItem(str(np.max(arr) - np.min(arr))))
-        enob = np.log2(2 ** 16 / (rms + 1e-12))  # +1e-12防止除0
-        self.tab2_measure.setItem(0, 6, QTableWidgetItem("%.2f" % enob))
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65535)
+            sock.settimeout(3.0)
+            sock.bind((remote_ip, port))
 
-        # --- 频谱图 ---
-        self.tab3_plt.clear()
-        N = len(arr)
-        if N == 0:
-            return
-        fs = 40e6  # TODO: 修改为你的实际采样率Hz
-        window = signal.kaiser(N, 8)
-        arr_win = arr * window
-        fdata = np.abs(fftpack.fft(arr_win))[:N // 2] / np.sum(window)
-        fdata[0] /= 2
-        freqs = np.linspace(0, fs / 2, N // 2)
-        self.tab3_plt.plot(freqs, 20 * np.log10(fdata + 1e-12), pen='g')
-        self.tab3_plt.setLabel('left', 'dB')
-        self.tab3_plt.setLabel('bottom', 'Frequency (Hz)')
+            self.device.sample(sample_len)
+            self.append_text("采样命令已发送，等待采样完成...")
+            time.sleep(1.5)
+            self.device.datacollect(sample_len)
+            self.append_text("数据上传命令已发送，等待UDP数据...")
 
-        # 频谱相关统计(举例)
-        dBFS = 20 * np.log10(np.max(fdata) / (2**15))
-        self.tab3_measure.setItem(0, 0, QTableWidgetItem("通道1"))
-        self.tab3_measure.setItem(0, 1, QTableWidgetItem("%.2f" % dBFS))
-        self.tab3_measure.setItem(0, 2, QTableWidgetItem("--"))
-        self.tab3_measure.setItem(0, 3, QTableWidgetItem("--"))
-        self.tab3_measure.setItem(0, 4, QTableWidgetItem("--"))
-        self.tab3_measure.setItem(0, 5, QTableWidgetItem("--"))
+            group_target = sample_len  # 每通道点数 == 组数
+            groups_received = 0
+            data_bytes = []
 
-        self.append_text(f"波形采样及三图绘制完成，共 {N} 点")
+            while groups_received < group_target:
+                pkt, addr = sock.recvfrom(4096)
+                data_bytes.append(pkt)
+                pkt_array = np.frombuffer(pkt, dtype=np.uint8).reshape(-1, 4)
+                for row in pkt_array:
+                    ch_A = ((row[0] << 8) | row[1]) & 0x3FFF
+                    ch_B = ((row[2] << 8) | row[3]) & 0x3FFF
+                    print(f"组{groups_received}: 通道A={ch_A}, 通道B={ch_B}, 原始字节={[hex(x) for x in row]}")
+                    groups_received += 1
+                    if groups_received >= group_target:
+                        break   # 已收满，跳出for
+                if groups_received >= group_target:
+                    break       # 已收满，跳出while
+            sock.close()
+            udp_data = b''.join(data_bytes)
+
+
+            if not udp_data or len(udp_data) == 0:
+                self.append_text("UDP未收到数据！")
+                return
+            # ==== 1. 拆分A/B通道（每组4字节，A+B各一点，低14位） ====
+            data = np.frombuffer(udp_data, dtype=np.uint8)
+            group_count = len(data) // 4
+            data = data[:group_count*4].reshape(-1, 4)  # [组数, 4]
+
+            ch_A = ((data[:,0].astype(np.uint16) << 8) | data[:,1]) & 0x3FFF
+            ch_B = ((data[:,2].astype(np.uint16) << 8) | data[:,3]) & 0x3FFF
+
+            self.append_text(f"UDP采集数据已到达，每通道{group_count}点，开始绘图。")
+            print("A通道前20点：", ch_A[:20])
+            print("B通道前20点：", ch_B[:20])
+
+
+
+            # --- 时域波形 ---
+            self.tab1_plt.clear()
+            self.tab1_plt.plot(ch_A, pen='r', name='A')
+            self.tab1_plt.plot(ch_B, pen='b', name='B')
+
+            self.tab1_measure.setItem(0, 0, QTableWidgetItem("通道A"))
+            self.tab1_measure.setItem(0, 1, QTableWidgetItem(str(np.min(ch_A))))
+            self.tab1_measure.setItem(0, 2, QTableWidgetItem(str(np.max(ch_A))))
+            self.tab1_measure.setItem(0, 3, QTableWidgetItem("%.3f" % np.std(ch_A)))
+            self.tab1_measure.setItem(0, 4, QTableWidgetItem("%.3f" % np.mean(ch_A)))
+
+
+            # --- 直方图 ---
+            self.tab2_plt.clear()
+            hist, bins = np.histogram(ch_A, bins=100)
+            barItem = pg.BarGraphItem(x=bins[:-1], height=hist, width=(bins[1]-bins[0]), brush='r')
+            self.tab2_plt.addItem(barItem)
+
+            self.tab2_measure.setItem(0, 0, QTableWidgetItem("通道A"))
+            self.tab2_measure.setItem(0, 1, QTableWidgetItem(str(np.min(ch_A))))
+            self.tab2_measure.setItem(0, 2, QTableWidgetItem(str(np.max(ch_A))))
+            rms = np.std(ch_A)
+            self.tab2_measure.setItem(0, 3, QTableWidgetItem("%.2f" % rms))
+            self.tab2_measure.setItem(0, 4, QTableWidgetItem("%.2f" % np.mean(ch_A)))
+            self.tab2_measure.setItem(0, 5, QTableWidgetItem(str(np.max(ch_A) - np.min(ch_A))))
+            enob = np.log2(2 ** 16 / (rms + 1e-12))
+            self.tab2_measure.setItem(0, 6, QTableWidgetItem("%.2f" % enob))
+
+            # --- 频谱图 ---
+            self.tab3_plt.clear()
+            fs = 40e6  # 采样率，按实际修改
+            window = signal.kaiser(len(ch_A), 8)
+            arr_win = ch_A * window
+            fdata = np.abs(fftpack.fft(arr_win))[:len(ch_A) // 2] / np.sum(window)
+            fdata[0] /= 2
+            freqs = np.linspace(0, fs / 2, len(ch_A) // 2)
+            self.tab3_plt.plot(freqs, 20 * np.log10(fdata + 1e-12), pen='g')
+            self.tab3_plt.setLabel('left', 'dB')
+            self.tab3_plt.setLabel('bottom', 'Frequency (Hz)')
+
+
+            dBFS = 20 * np.log10(np.max(fdata) / (2**15))
+            self.tab3_measure.setItem(0, 0, QTableWidgetItem("通道A"))
+            self.tab3_measure.setItem(0, 1, QTableWidgetItem("%.2f" % dBFS))
+            self.tab3_measure.setItem(0, 2, QTableWidgetItem("--"))
+            self.tab3_measure.setItem(0, 3, QTableWidgetItem("--"))
+            self.tab3_measure.setItem(0, 4, QTableWidgetItem("--"))
+            self.tab3_measure.setItem(0, 5, QTableWidgetItem("--"))
+
+            self.append_text("采集+绘图完成。")
+        except Exception as e:
+            self.append_text(f"采集显示失败: {e}")
+
+
 
 
 if __name__ == '__main__':
@@ -876,3 +995,17 @@ if __name__ == '__main__':
     win = MainWindow()
     win.show()
     sys.exit(app.exec_())
+
+    
+    
+
+
+    
+
+    
+    
+
+
+    
+
+    
